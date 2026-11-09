@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hybrid compiler audit — findings & calibration map</title>
+<meta name="description" content="Independent static-analysis audit of the Hybrid (Go-superset) compiler: accepted-but-unsound and accepted-but-unbuildable repros, with race-detector evidence and a duplicate-checked calibration map.">
+<style>
+  :root {
+    --bg: #0b0e14; --panel: #121722; --line: #232b3b; --fg: #e6e9f0;
+    --dim: #9aa4b8; --acc: #7ee787; --warn: #f0b072; --bad: #ff7b72; --link: #79c0ff;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+    font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 48px 24px 96px; }
+  header { border-bottom: 1px solid var(--line); padding-bottom: 28px; margin-bottom: 36px; }
+  h1 { font-size: 30px; margin: 0 0 8px; letter-spacing: -0.02em; }
+  .sub { color: var(--dim); font-size: 15px; max-width: 780px; }
+  .meta { margin-top: 16px; font-family: var(--mono); font-size: 12.5px; color: var(--dim); display: flex; gap: 18px; flex-wrap: wrap; }
+  .meta b { color: var(--fg); font-weight: 600; }
+  h2 { font-size: 20px; margin: 44px 0 14px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
+  h3 { font-size: 16px; margin: 26px 0 8px; }
+  p { margin: 10px 0; }
+  a { color: var(--link); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code, pre { font-family: var(--mono); font-size: 13px; }
+  code { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 1px 5px; }
+  pre { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; overflow-x: auto; line-height: 1.5; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin: 18px 0; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px; }
+  .card h3 { margin-top: 0; }
+  .tag { display: inline-block; font-family: var(--mono); font-size: 11px; padding: 2px 7px; border-radius: 999px; border: 1px solid var(--line); color: var(--dim); margin-right: 6px; }
+  .tag.ok { color: var(--acc); border-color: #2c4a33; }
+  .tag.bad { color: var(--bad); border-color: #5a2f2c; }
+  .tag.warn { color: var(--warn); border-color: #5a442c; }
+  table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 14px; }
+  th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--dim); font-weight: 600; font-size: 12.5px; text-transform: uppercase; letter-spacing: 0.06em; }
+  .k { font-family: var(--mono); font-size: 13px; }
+  footer { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--line); color: var(--dim); font-size: 13px; }
+  .hl { color: var(--acc); }
+  .muted { color: var(--dim); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>Hybrid compiler — independent audit findings</h1>
+  <div class="sub">
+    Static-analysis audit of <a href="https://github.com/limitlessprojects/Go-Hybrid">Hybrid</a>, a safety-checked
+    Go superset. Every claim below is a <b>minimal program the checker accepts</b> plus the evidence that it is
+    unsound (<span class="k">go -race</span>) or unbuildable (<span class="k">go build</span>), with a
+    duplicate check against the public issue board. Nothing here is a theory: all repros run end to end.
+  </div>
+  <div class="meta">
+    <span>target commit <b>30206b57</b></span>
+    <span>checker <b>hyb</b> release build (rust 1.99.1)</span>
+    <span>race <b>go1.27.3 -race</b></span>
+    <span>programs exercised <b>≈600</b></span>
+  </div>
+</header>
+
+<h2>Reports filed (buildable class, <span class="k">HYB-E1002</span> / GUARANTEES row 13)</h2>
+
+<div class="grid">
+  <div class="card">
+    <h3><a href="https://github.com/limitlessprojects/Go-Hybrid/issues/4223">#4223 · associated functions skip member &amp; argument resolution</a></h3>
+    <span class="tag bad">accepted → unbuildable</span>
+    <p><code>fn box.new(v int) box</code> lowers to <code>box_new</code>, and the selector base skips the member check
+    that every other callee gets. <code>b.new(2)</code> passes <code>hyb check</code>; Go says
+    <code>b.new undefined</code>. The argument-type check is skipped for the same callee:
+    <code>box.new("s")</code> passes and Go rejects the string.</p>
+    <p class="muted">Controls: ordinary fn / method / task / defer with the same mistakes are all rejected on the
+    same commit — only the mangled associated function fails open.</p>
+  </div>
+  <div class="card">
+    <h3><a href="https://github.com/limitlessprojects/Go-Hybrid/issues/4222">#4222 · package-level redeclaration blind spot</a></h3>
+    <span class="tag bad">accepted → unbuildable</span>
+    <p>Two <code>.hy</code> files, or a <code>.hy</code> beside a hand-written <code>.go</code>, that declare the same
+    top-level name: each file passes <code>hyb check</code> alone, <code>hyb generate</code> writes both, and
+    <code>go build</code> fails with <code>redeclared in this block</code>. The headline workflow is
+    “drop a <code>.hy</code> beside your <code>.go</code> files”.</p>
+    <p class="muted">The generator already reads the directory and refuses to overwrite hand-written files, so the
+    package context exists at generate time.</p>
+  </div>
+</div>
+
+<h2>Soundness confirmations (open issues, new evidence)</h2>
+
+<table>
+  <thead><tr><th>Issue</th><th>What was added</th><th>Evidence</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><a href="https://github.com/limitlessprojects/Go-Hybrid/issues/1997">#1997</a></td>
+      <td><code>any</code>-shaped storage drops the <span class="k">may_share</span> edge — the <b>place-store</b> route
+      <code>h.item = shared</code> (not only literal-embed / struct-copy), plus a <code>[]any</code> index source</td>
+      <td><span class="k">check exit 0</span> + DATA RACE on the shared map (3/3 runs). Discriminator: add one
+      <code>[]int</code> field and the same program is rejected.</td>
+    </tr>
+    <tr>
+      <td><a href="https://github.com/limitlessprojects/Go-Hybrid/issues/3947">#3947</a></td>
+      <td>(a) the <b>channel-send</b> and <b>select-send</b> check-sites; (b) the filed reproducer waits
+      <code>&lt;-done</code> before returning and <b>cannot race</b> — a variant that does; (c) a second gap: an
+      alias created <i>after</i> the capture (<code>alias := shared</code>) never reaches the snapshot</td>
+      <td><span class="k">check exit 0</span> + DATA RACE (slice and map twins; map twin also
+      <code>fatal error: concurrent map writes</code>). Control: the flat (no intermediate block) twin is rejected.</td>
+    </tr>
+    <tr>
+      <td><a href="https://github.com/limitlessprojects/Go-Hybrid/issues/1386">#1386</a></td>
+      <td>the trigger for builtin-name shadowing is the <b>generic callee</b>: <code>check_user_fn_arg_types</code>
+      returns early, so the only cross-check is skipped</td>
+      <td>generic sink → <span class="k">check exit 0</span> + DATA RACE; non-generic sink → correctly rejected with
+      <code>HYB-E1002</code>.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>Calibration map — what is <i>already</i> closed (saves the next audit days)</h2>
+
+<p class="muted">Re-run on the same commit; listed because a report on these is a duplicate, not a finding.</p>
+
+<table>
+  <thead><tr><th>Surface</th><th>Result on <span class="k">30206b57</span></th><th>Covered by</th></tr></thead>
+  <tbody>
+    <tr><td>Flat alias / freeze machinery — 211 generated programs (14 alias-derivation forms × 2 move directions × 4 scopes)</td><td>every racy shape <b>rejected</b> (<code>HYB-E3003</code>)</td><td>—</td></tr>
+    <tr><td>Captured-write escapes one call away (user fn, pointer-receiver method, local closure, inline factory)</td><td><b>rejected</b> (<code>HYB-E3013</code>)</td><td>#3314 — already fixed</td></tr>
+    <tr><td>Foreign receivers, bound closures, shadowed captures, <code>delete</code>/<code>clear</code>/<code>copy</code> inside escaping closures</td><td><b>rejected</b></td><td>#2418 — already fixed</td></tr>
+    <tr><td>Block-scoped alias assignment + move-the-alias</td><td><b>rejected</b></td><td>#399 — stale issue, fixed</td></tr>
+    <tr><td>Container-carried closures (struct / slice / map / ptr / append) at spawn and send</td><td><b>rejected</b></td><td>—</td></tr>
+    <tr><td>Read-only capture escaping to a foreign API (<code>s.report</code> method value)</td><td>accepted <i>and</i> races, but explicitly outside the claim</td><td>GUARANTEES rows 5/9 — not a bug</td></tr>
+    <tr><td><code>managed(...)</code> hatch</td><td>accepted and races by design</td><td>row 8/14 — not a bug</td></tr>
+    <tr><td>Builtins operand layer (<code>append</code>, <code>copy</code>, <code>make</code>, <code>delete</code>, <code>close</code>, <code>len</code>, <code>cap</code>, <code>new</code>, <code>clear</code>, <code>min</code>, <code>max</code>)</td><td>all reject correctly</td><td>—</td></tr>
+    <tr><td>Emitted-Go semantics (ranges incl. int8 edges, defer order/timing, shadowing, append capacity, map delete, per-iteration capture, receivers, overflow, division)</td><td>behaviour matches the spec</td><td>—</td></tr>
+  </tbody>
+</table>
+
+<h2>Still-open root causes (duplicate-checked)</h2>
+
+<table>
+  <thead><tr><th>Local repro</th><th>Mechanism</th><th>Open issue</th></tr></thead>
+  <tbody>
+    <tr><td><code>h.item = shared</code> (<code>any</code> field) + <code>ch &lt;- move h</code></td><td><code>shape_may_share(Unknown)=false</code> → no alias edge → freeze covers only <code>h</code></td><td>#1997</td></tr>
+    <tr><td>intermediate-block <code>defer fn(){ m[...] }()</code> + later <code>ch &lt;- move m</code></td><td>closure capture snapshot is not refreshed after the move</td><td>#3947</td></tr>
+    <tr><td><code>alias := shared</code> created after the capture, then <code>move alias</code></td><td>snapshot never absorbs post-capture alias edges</td><td>#3947 (second gap)</td></tr>
+    <tr><td><code>type mm = map[string]int; m := mm{}; y := m; task w(move m); y["r"]=i</code></td><td>composite-literal spelling falls into the <code>Struct(Some(alias))</code> fallback → <code>may_share</code> false</td><td>#1781</td></tr>
+    <tr><td><code>fn len(m map[string]int) map[string]int</code> through a generic callee</td><td>predeclared-name shadowing + generic callee skips the argument-type check</td><td>#1386</td></tr>
+    <tr><td>generic fn argument / return / constraint checks</td><td>arity, argument types, return types, <code>comparable</code> constraints</td><td>#1961 / #2899 / #3082 / #729</td></tr>
+  </tbody>
+</table>
+
+<h2>Method</h2>
+<p>
+  Checker built from source (<code>cargo build --release</code>, pinned rust). Every program goes through
+  <code>hyb check</code> (verdict), <code>hyb generate</code> (transpile) and <code>hyb build --race</code>
+  (cgo race-detector build) — the same pipeline the project's own differential loop uses. Findings are kept only when
+  the program is <b>accepted with 0 diagnostics</b> and the evidence reproduces deterministically; a silent race
+  detector means the candidate is discarded. Duplicate checks are run against the public issue board before anything
+  is filed, and the calibration map above lists what was <i>not</i> reported for exactly that reason.
+</p>
+
+<footer>
+  Contact: <a href="https://github.com/aaskfuqw">github.com/aaskfuqw</a> · findings and repros available on request ·
+  <span class="muted">page generated from a local audit workspace; all targets were public open-source repositories.</span>
+</footer>
+
+</div>
+</body>
+</html>
